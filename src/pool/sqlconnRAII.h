@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+/*
+ * Original: TinyWebServer-master (author: mark)
+ * Modifications: YourName (2026-04-04) - brief note
+ */
+
+#ifndef SQLCONNRAII_H
+#define SQLCONNRAII_H
+
+#include "sqlconnpool.h"
+
+class SqlConnRAII
+{
+public:
+    SqlConnRAII(MYSQL **sql, SqlConnPool *connpool)
+    {
+        assert(connpool);
+        *sql = connpool->GetConn();
+        sql_ = *sql;
+        connpool_ = connpool;
+    }
+
+    ~SqlConnRAII()
+    {
+        if (sql_)
+        {
+            connpool_->FreeConn(sql_);
+        }
+    }
+
+private:
+    MYSQL *sql_;
+    SqlConnPool *connpool_;
+};
+
+#endif // SQLCONNRAII_H

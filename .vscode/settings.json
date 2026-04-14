@@ -1,0 +1,17 @@
+{
+    // C/C++ 核心配置（修复报错）
+    "C_Cpp.default.compilerPath": "/usr/bin/g++",
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.cStandard": "c11",
+    "C_Cpp.intelliSenseEngine": "default",
+    // 修复：必须小写！
+    "C_Cpp.errorSquiggles": "enabled",
+    // CMake 适配 WSL
+    "cmake.generator": "Unix Makefiles",
+    "cmake.preferredGenerators": [
+        "Unix Makefiles"
+    ],
+    // 代码格式化
+    "editor.formatOnSave": true,
+    "C_Cpp.formatting": "clangFormat"
+}
