@@ -338,8 +338,9 @@ static bool test_login_register_chat_private_userlist()
 {
     // LOGIN
     json login;
-    login["username"] = 1001;
-    login["password"] = "pw";
+    login["username"] = 10000000;
+    login["password"] = "password123";
+    login["display_name"] = "Alice";
     std::string f_login = make_frame(ProtocolRequest::LOGIN, login);
     Buffer b1;
     b1.Append(f_login);
@@ -351,7 +352,7 @@ static bool test_login_register_chat_private_userlist()
 
     // REGISTER
     json reg;
-    reg["username"] = 1002;
+    reg["username"] = 10000001;
     reg["password"] = "secret";
     reg["display_name"] = "Bob";
     std::string f_reg = make_frame(ProtocolRequest::REGISTER, reg);
@@ -363,7 +364,7 @@ static bool test_login_register_chat_private_userlist()
 
     // CHAT (public)
     json chat;
-    chat["username"] = 1001;
+    chat["username"] = 10000000;
     chat["message"] = "hello everyone";
     std::string f_chat = make_frame(ProtocolRequest::CHAT, chat);
     Buffer b3;
@@ -374,8 +375,8 @@ static bool test_login_register_chat_private_userlist()
 
     // PRIVATE_CHAT
     json pchat;
-    pchat["from"] = 1001;
-    pchat["to"] = 1002;
+    pchat["from"] = 10000000;
+    pchat["to"] = 10000001;
     pchat["message"] = "hi bob";
     std::string f_pchat = make_frame(ProtocolRequest::PRIVATE_CHAT, pchat);
     Buffer b4;
@@ -386,7 +387,7 @@ static bool test_login_register_chat_private_userlist()
 
     // USER_LIST (server->client): we can simulate receiving a USER_LIST frame
     json ulist;
-    ulist["users"] = json::array({1001, 1002});
+    ulist["users"] = json::array({10000001, 10000002});
     std::string f_ulist = make_frame(ProtocolRequest::USER_LIST, ulist);
     Buffer b5;
     b5.Append(f_ulist);
@@ -395,13 +396,13 @@ static bool test_login_register_chat_private_userlist()
         return false;
 
     // basic content checks
-    if (r1.json().value("username", 0) != 1001)
+    if (r1.json().value("username", 0) != 10000000)
         return false;
-    if (r2.json().value("username", 0) != 1002)
+    if (r2.json().value("username", 0) != 10000001)
         return false;
     if (r3.json().value("message", std::string{}) != "hello everyone")
         return false;
-    if (r4.json().value("to", 0) != 1002)
+    if (r4.json().value("to", 0) != 10000001)
         return false;
     if (!r5.json().contains("users"))
         return false;
