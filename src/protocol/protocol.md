@@ -1,259 +1,263 @@
-# 网络聊天室自定义协议文档
+# 网络聊天室自定义协议文档（修订版）
 
-# 1. 协议概述
+## 0. 目标
+本文件定义客户端与服务器之间基于 TCP 的二进制帧协议：固定包头（binary header）+ JSON 包体（UTF-8）。重点说明头部结构、数字枚举映射、字节序、最大长度、以及常见错误处理建议，便于实现互操作性与测试。
 
-本协议用于网络聊天室客户端与服务器之间的通信交互，基于TCP流式传输，采用“固定包头+JSON包体”的结构，解决TCP粘包拆包问题，同时通过统一的`type`字段区分消息类型，确保通信逻辑清晰、可扩展、易解析。
+## 1. 协议概述
+本协议采用“包头（binary header）+ JSON 包体（UTF-8）”的格式，解决 TCP 粘包/拆包问题。包头为固定 10 字节：魔数（4B）+ 类型（2B）+ body 长度（4B）。所有头字段使用网络字节序（big-endian）。
 
-# 2. 协议整体结构
+重要设计原则：
+- 头部决定包体长度，接收端应先完整读取头部再按长度读取 body。
+- 头部的 `type` 为二进制枚举（uint16），用于快速分发；JSON 包体内不强制要求 `type` 字段（可选冗余）。
 
-为解决TCP流式传输中的粘包、拆包问题，协议采用“包头+包体”的固定格式，具体如下：
+## 2. 帧结构（Frame）
+
+总体格式：
 
 ```plain
-[包长度(10字节)] + [JSON包体(UTF-8编码)]
+[Header (10 bytes)] + [Body (JSON, len bytes, UTF-8)]
 ```
 
-## 2.1 包头说明
+### 2.1 Header（10 字节）
 
-- 长度：10字节
-  - 魔数：4字节
-  - 类型：2字节
-  - body长度：4字节
-- 作用：标识后续JSON包体的字节数，采用网络字节序（大端序）存储，避免不同主机字节序差异导致解析错误
-- 解析方式：接收端先读取4字节包头，转换为主机字节序后，再读取对应长度的JSON数据
+- 魔数 Magic (4 bytes, uint32, big-endian)：用于快速检测帧边界与协议一致性。
+- 类型 Type (2 bytes, uint16, big-endian)：消息类型枚举（见第 3 节）。
+- Body 长度 Len (4 bytes, uint32, big-endian)：紧随其后的 JSON body 的字节数。
 
-## 2.2 包体说明
+推荐魔数（示例，请在实现中确认值并保持一致）：
 
-- 格式：JSON字符串（UTF-8编码），确保中文等特殊字符正常传输
+- Magic = 0x00114514
 
-# 3. 消息类型（type）定义
+注意：实现可以先读 10 字节完整头部，或先读 4 字节魔数做快速验证，再读剩余 6 字节。任意一种方式都必须保证一致性与可靠的错误处理。
 
-通过`type`字段统一区分消息用途，每种类型对应固定的JSON格式，具体如下表：
+### 2.2 Body（JSON）
 
-| type值       | 消息名称 | 发送方                             | 核心用途                                         |
-| :----------- | :------- | :--------------------------------- | :----------------------------------------------- |
-| LOGIN        | 登录请求 | 客户端 → 服务器                    | 客户端提交用户名、密码，请求登录聊天室           |
-| ACK          | 登录回复 | 服务器 → 客户端                    | 服务器返回登录结果                               |
-| CHAT         | 公聊消息 | 客户端→服务器→全体客户端           | 客户端发送公聊消息，服务器广播给所有在线用户     |
-| PRIVATE_CHAT | 私聊消息 | 客户端→服务器→目标客户端           | 客户端发送私聊消息，服务器转发给指定目标用户     |
-| USER_LIST    | 用户列表 | 服务器→客户端（主动推送/被动响应） | 返回当前所有在线用户的用户名列表                 |
-| LOGOUT       | 退出请求 | 客户端→服务器                      | 客户端请求退出聊天室，服务器清理用户状态         |
-| ERROR        | 错误通知 | 服务器→客户端                      | 服务器返回错误信息（如用户名不存在、权限不足等） |
-| REGISTER     | 注册     | 客户端→服务器                      | 注册                                             |
+- Body 为 UTF-8 编码的 JSON 文本，长度由 Header.Len 指定。
+- Body 字段用于传输具体的请求/响应数据，字段命名请参照第 4 节。
 
-# 4. 各消息JSON格式详解
+### 2.3 最大长度与防护
 
-## 4.1 登录请求（LOGIN）
+- 建议定义最大 body 长度常量 `MAX_BODY_LEN`（例如 4096 字节，视需求调整）。
+- 若 Header.Len 为 0，表示空 body（合法）。若 Header.Len > MAX_BODY_LEN，应当：
+  - 拒绝该帧并关闭连接，或
+  - 返回 `ERROR` 帧（见第 4.7）后再断开，或
+  - 按实现策略记录并忽略后续流量，但务必避免 OOM。
 
-客户端向服务器提交登录信息，触发登录验证逻辑。
+## 3. 二进制 `type` 枚举（Header.Type）
+
+Header.Type 为 uint16 枚举，必须在实现中与代码保持一致。示例映射：
+
+| 值 (uint16) | 名称 | 说明 |
+|---:|:---|:---|
+| 1 | LOGIN | 登录请求 |
+| 2 | ACK | 通用应答/结果 |
+| 3 | CHAT | 公聊消息 |
+| 4 | PRIVATE_CHAT | 私聊消息 |
+| 5 | USER_LIST | 用户列表 |
+| 6 | LOGOUT | 退出请求 |
+| 7 | ERROR | 错误通知 |
+| 8 | REGISTER | 注册请求 |
+| 9 | GROUP_CHAT_HISTORY | 群聊历史 |
+| 10 | PRIVATE_CHAT_HISTORY | 私聊历史 |
+
+说明：JSON 包体内可以包含同语义的字符串字段（例如 "type": "LOGIN"）作为可读冗余，但服务端分发应以 Header.Type 为准。
+
+## 4. JSON Body 字段约定（按消息类型）
+
+通用说明：
+- 为避免歧义，建议区分 `user_id`（整型、唯一标识符）与 `display_name` / `username`（字符串、展示用途）。如果系统以数字作为用户名（例如数据库自增 id），请在协议中统一使用 `user_id`（整型）。
+- 所有示例 JSON 均为 UTF-8 编码。
+- 通用 ACK 模板：
 
 ```json
 {
-  "username": "zhangsan",  // 客户端输入的用户名（唯一）
-  "password": "123456"     // 客户端输入的密码（可加密传输，本协议暂用明文示例）
+  "status": "ok" | "error",
+  "msg": "人类可读的说明",
+  "data": { ... } // 可选
 }
 ```
 
-返回ACK
-```json
-{
-  "msg" : "",
-  "token": ""
-}
+### 4.1 LOGIN（Header.Type = 1）
 
-
-## 4.2 回复（ACK）
-
-服务器验证登录信息后，向客户端返回结果。
-
-说明：服务器对每一种客户端请求处理完成后都会返回一个 `ACK` 报文以通知客户端处理结果，`ACK` 格式示例统一如下：
+客户端 -> 服务器：
 
 ```json
 {
-  "msg": "可读文本描述",
-  // 可选字段：token、user_id、code、data 等
+  "user_id": 114,        // 推荐使用数值 id，或使用 "username": "alice"（字符串）但请保持一致
+  "password": "123456"
 }
 ```
 
-下面各小节会给出针对具体请求的 `ACK` 示例。
-
-
-### 4.3 公聊消息（CHAT）
-
-### 4.3.1 
-
-客户端发送公聊消息，提交给服务器。
+服务器应返回 ACK（Header.Type = 2）：
 
 ```json
 {
-  "username": "zhangsan",  // 发送方用户名
-  "msg": "大家好！欢迎加入聊天室~",  // 公聊消息内容
-  "token":"114514"             // 登录令牌
-}
-```
-```json
-{
-  "msg": "OK"
+  "status": "ok",
+  "msg": "login successful",
+  "data": { "token": "<session_token>", "user_id": 114 }
 }
 ```
 
+### 4.2 REGISTER（Header.Type = 8）
 
-## 4.4 私聊消息（PRIVATE_CHAT）
-
-### 4.4.1 
-
-客户端发送私聊消息，指定接收方，提交给服务器。
+客户端 -> 服务器：
 
 ```json
 {
-  "from": "zhangsan",      // 发送方用户名
-  "to": "lisi",            // 接收方用户名
-  "msg": "私下说个事，今天一起吃饭吗？",  // 私聊消息内容
-  "token":"114514"             // 登录令牌
+  "username": "alice",     // 显示名
+  "password": "123456",
+  "display_name": "Alice Zhang" // 可选
 }
 ```
 
-服务器回复（ACK）示例（表示服务器已接收并广播或保存消息）：
-```json
-{
-  "msg": "OK"
-}
-```
-
-
-服务器向用户通知信息。
-```json
-{
-  "from": "zhangsan",      // 发送方用户名
-  "msg": "私下说个事，今天一起吃饭吗？",  // 私聊消息内容
-  "token":"114514"             // 登录令牌
-}
-```
-
-
-## 4.5 请求用户数据
-
-服务器主动推送（如用户登录/退出时）或响应客户端请求，返回当前在线用户列表。
+服务器 ACK（示例）：
 
 ```json
 {
-  "username" : 114, //用户id
-  "token": ""  // 在线用户名列表（数组形式）
-}
-```
-
-服务器回复（ACK）示例（返回用户列表）：
-```json
-{
-  "msg": "ok",
-  "data": ["zhangsan", "lisi", "wangwu"]
-}
-```
-
-服务器向用户通知信息。
-```json
-{
-  "msg": "私下说个事，今天一起吃饭吗？",  // 私聊消息内容
-  "token":"114514"             // 登录令牌
-}
-```
-
-
-
-## 4.6 退出请求（LOGOUT）
-
-客户端主动退出聊天室，向服务器提交退出请求。
-
-```json
-{
-  "username": "zhangsan",  // 退出的用户名
-  "token" : ""
-}
-```
-
-服务器回复（ACK）示例：
-```json
-{
-  "msg": "logout successful"
-}
-```
-
-## 4.7 错误通知（ERROR）
-
-服务器在处理请求时出现异常（如登录失败、私聊对象不在线等），向客户端返回错误信息。
-
-```json
-{
-  "type": "ERROR",
-  "code": 403,             // 错误码（自定义，如403：权限不足；404：用户不存在）
-  "msg": "用户名不存在"     // 错误描述信息
-}
-```
-
-当服务器在处理请求过程中遇到可预见错误时，通常同时返回 `ACK`（status="error"）和/或 `ERROR` 报文，便于客户端统一处理。
-
-## 4.8 注册请求（REGISTER）
-
-```json
-{
-  "type": "REGISTER",
-	"username": "zhangsan",  // 客户端输入的用户名（唯一）
-  "password": "123456" 
-}
-```
-
-服务器回复（ACK）示例（注册成功/失败）：
-```json
-{
+  "status": "ok",
   "msg": "registration successful",
+  "data": { "user_id": 114 }
 }
 ```
 
+### 4.3 CHAT（Header.Type = 3）
 
+客户端发送公聊：
 
-## 4.9 请求群聊历史（GROUP_CHAT_HISTORY）
+```json
+{
+  "user_id": 114,
+  "msg": "大家好！",
+  "token": "<session_token>"
+}
+```
 
-客户端请求群聊历史消息（分页/偏移）。请求字段：`token` 用于鉴权，`offset` 指定从哪条记录开始，`limit` 是可选的返回条数。
+服务器广播给其他客户端的通知（示例）：
+
+```json
+{
+  "user_id": 114,
+  "display_name": "Alice Zhang",
+  "msg": "大家好！",
+  "time": "2026-04-19T12:34:56Z"
+}
+```
+
+### 4.4 PRIVATE_CHAT（Header.Type = 4）
+
+客户端 -> 服务器：
+
+```json
+{
+  "from_id": 114,
+  "to_id": 115,
+  "msg": "私下说个事",
+  "token": "<session_token>"
+}
+```
+
+服务器转发给目标客户端的通知：
+
+```json
+{
+  "from_id": 114,
+  "msg": "私下说个事",
+  "time": "2026-04-19T12:35:00Z"
+}
+```
+
+### 4.5 USER_LIST（Header.Type = 5）
+
+服务器响应或主动推送（示例）：
+
+```json
+{
+  "status": "ok",
+  "data": [ { "user_id": 114, "display_name": "Alice" }, { "user_id":115, "display_name":"Bob" } ]
+}
+```
+
+### 4.6 LOGOUT（Header.Type = 6）
+
+客户端请求：
+
+```json
+{ "user_id": 114, "token": "<session_token>" }
+```
+
+服务器 ACK：
+
+```json
+{ "status": "ok", "msg": "logout successful" }
+```
+
+### 4.7 ERROR（Header.Type = 7）
+
+服务器在出现可预期错误时返回：
+
+```json
+{
+  "status": "error",
+  "code": 403,
+  "msg": "用户名不存在"
+}
+```
+
+建议定义常用错误码表（示例）：
+
+- 400: Bad Request / 解析错误
+- 401: Unauthorized / token 无效
+- 403: Forbidden / 权限不足
+- 404: Not Found / 目标用户或资源不存在
+- 413: Payload Too Large / 超大帧长度
+
+### 4.8 群聊/私聊历史（Header.Type = 9 / 10）
 
 请求示例：
+
+```json
+{ "token": "<session_token>", "offset": 0, "limit": 50 }
+```
+
+返回示例：
+
 ```json
 {
-  "token": "<session_token>",
-  "offset": 0,
-  "limit": 50
+  "status": "ok",
+  "messages": [ { "user_id":114, "msg":"...", "time":"2026-04-10T15:30:00Z", "display_name":"Alice" } ],
+  "next_offset": 50
 }
 ```
 
-服务器返回示例（ACK + 消息数据）：
-```json
-{
-  "messages": [
-      {"username":"zhangsan","msg":"大家好","time":"2026-04-10 15:30:00", "display_name": "zhangsan"}
-    ]
-}
+## 5. 接收端参考伪码
+
+```pseudo
+function recv_frame(socket):
+  header = read_exact(socket, 10)  // 阻塞或循环读取直到 10 字节
+  magic = ntohl(header[0:4])
+  if magic != MAGIC: error
+  type = ntohs(header[4:6])
+  len = ntohl(header[6:10])
+  if len > MAX_BODY_LEN: error_or_close()
+  body = read_exact(socket, len)
+  json = parse_json(body)
+  dispatch(type, json)
 ```
 
-如果无更多数据，`messages` 可能为空且 `next_offset` 等于当前总数。
+实现细节：
+- 对于非阻塞 socket，read_exact 应在循环中累积，处理 EAGAIN/EWOULDBLOCK。
+- 对于 ET(epoll edge-trigger) 模式，必须在读取循环中读尽数据。
 
-## 4.10 请求私聊历史（PRIVATE_CHAT_HISTORY）
+## 6. 调试与示例辅助
 
-客户端请求两人私聊历史，同样支持分页。请求应包含 `from`/`to` 用户名或双方任意一方，并包含 `token`、`offset`、`limit`。
+- 建议在调试阶段提供“示例帧（hex）”以便 tcpdump/wireshark 辅助定位。
+- 建议在协议文档旁附带一个小型测试程序或 Python 脚本，用于构造合法/非法帧并与服务器交互。
 
-请求示例：
-```json
-{
-  "token": "<session_token>",
-  "from": "zhangsan",
-  "to": "lisi",
-  "offset": 0,
-  "limit": 50
-}
-```
+## 7. 兼容性注意事项
 
-服务器返回示例：
-```json
-{
-  "messages": [
-      {"username":"zhangsan","msg":"大家好","time":"2026-04-10 15:30:00"}
-    ]
-}
-```
+- 明确 `user_id` 类型（int）或 `username`（string）並在全部示例中保持一致。
+- 明确 Header.Type 的数值映射并在代码里维护同一份枚举定义（建议单文件/头文件导出枚举）。
+
+---
+
+（文档修订结束）
