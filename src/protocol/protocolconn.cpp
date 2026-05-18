@@ -223,6 +223,7 @@ void ProtocolConn::Login()
         LOG_WARN("Login failed: missing username or password");
         return;
     }
+
     unsigned long long username = requestJson["username"].get<unsigned long long>();
     std::string password = requestJson["password"].get<std::string>();
     if (password.empty())
@@ -236,164 +237,131 @@ void ProtocolConn::Login()
     SqlConnRAII(&conn, SqlConnPool::Instance());
     assert(conn);
 
+    // ====================== 【修复】查询用户 ======================
     MYSQL_STMT *stmt = mysql_stmt_init(conn);
     const char *sql = "SELECT password, status, display_name FROM users WHERE username=?";
-    if (!stmt || mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0)
+    if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0)
     {
-        Error("Database error");
-        LOG_ERROR("Failed to prepare statement: %s", mysql_error(conn));
-        if (stmt)
-        {
-            mysql_stmt_free_result(stmt);
-            mysql_stmt_close(stmt);
-        }
-        return;
-    }
-
-    MYSQL_BIND bind_param;
-    memset(&bind_param, 0, sizeof(bind_param));
-    bind_param.buffer_type = MYSQL_TYPE_STRING;
-    bind_param.buffer = (char *)&username;
-    bind_param.buffer_length = sizeof(username);
-
-    if (mysql_stmt_bind_param(stmt, &bind_param) != 0)
-    {
-        Error("Database error");
-        LOG_ERROR("Failed to bind parameters: %s", mysql_error(conn));
-        mysql_stmt_free_result(stmt);
+        LOG_ERROR("prepare failed: %s", mysql_error(conn));
+        Error("DB error");
         mysql_stmt_close(stmt);
         return;
     }
 
-    MYSQL_BIND bind_result[3];
-    memset(bind_result, 0, sizeof(bind_result));
-    char display_name[41] = {0};
-    char status = 0;
+    MYSQL_BIND bind_param = {0};
+    bind_param.buffer_type = MYSQL_TYPE_LONGLONG; // ✅ 修复：数字类型
+    bind_param.buffer = &username;                // ✅ 修复：正确类型
+
+    if (mysql_stmt_bind_param(stmt, &bind_param) != 0)
+    {
+        Error("DB error");
+        mysql_stmt_close(stmt);
+        return;
+    }
+
+    // 绑定结果（声明变量）
     char password_[21] = {0};
-    unsigned long password_len = 0;
-    unsigned long display_name_len = 0;
+    unsigned char status = 0;
+    char display_name[41] = {0};
+    unsigned long pwd_len = 0, name_len = 0;
+
+    MYSQL_BIND bind_result[3] = {0};
     bind_result[0].buffer_type = MYSQL_TYPE_STRING;
     bind_result[0].buffer = password_;
-    bind_result[0].length = &password_len;
+    bind_result[0].buffer_length = sizeof(password_);
+    bind_result[0].length = &pwd_len;
 
     bind_result[1].buffer_type = MYSQL_TYPE_TINY;
-    bind_result[1].buffer = (void *)&status;
+    bind_result[1].buffer = &status;
     bind_result[1].is_unsigned = 1;
 
     bind_result[2].buffer_type = MYSQL_TYPE_STRING;
     bind_result[2].buffer = display_name;
-    bind_result[2].length = &display_name_len;
+    bind_result[2].buffer_length = sizeof(display_name);
+    bind_result[2].length = &name_len;
 
-    if (mysql_stmt_bind_result(stmt, bind_result) != 0)
+    // ====================== 执行查询并绑定结果 ======================
+    int ret = mysql_stmt_execute(stmt);
+    if (ret != 0)
     {
-        Error("Database error");
-        LOG_ERROR("Failed to bind result: %s", mysql_error(conn));
-        mysql_stmt_free_result(stmt);
+        Error("DB error");
         mysql_stmt_close(stmt);
         return;
     }
 
-    int ret = mysql_stmt_fetch(stmt);
+    if (mysql_stmt_bind_result(stmt, bind_result) != 0)
+    {
+        LOG_ERROR("bind result failed: %s", mysql_stmt_error(stmt));
+        Error("DB error");
+        mysql_stmt_close(stmt);
+        return;
+    }
+
+    ret = mysql_stmt_fetch(stmt);
     if (ret == MYSQL_NO_DATA)
     {
         Error("NO USER");
         LOG_WARN("Login failed: user not found");
-        mysql_stmt_free_result(stmt);
         mysql_stmt_close(stmt);
         return;
     }
-    else
-    {
-        Error("Database error");
+    // MYSQL_DATA_TRUNCATED may be returned if buffer too small; still use available data
+    if (ret != 0 && ret != MYSQL_DATA_TRUNCATED)
+    { // 只有真正出错才报错
         LOG_ERROR("fetch error: %s", mysql_stmt_error(stmt));
-        mysql_stmt_free_result(stmt);
+        Error("DB error");
         mysql_stmt_close(stmt);
         return;
     }
 
-    std::string stored_password(password_, password_len);
-    std::string stored_display_name(display_name, display_name_len);
+    // 拿到数据
+    std::string stored_pw(password_, pwd_len);
+    std::string stored_name(display_name, name_len);
 
-    if (stored_password != password)
+    if (stored_pw != password)
     {
         Error("WRONG PASSWORD");
-        LOG_WARN("Login failed: wrong password for user '%llu'", username);
-        mysql_stmt_free_result(stmt);
         mysql_stmt_close(stmt);
         return;
     }
-
     if (status == 0)
     {
         Error("USER DISABLED");
-        LOG_WARN("Login failed: user '%llu' is disabled", username);
-        mysql_stmt_free_result(stmt);
         mysql_stmt_close(stmt);
         return;
     }
 
+    // 生成 token
     unsigned char token[32];
-    if (RAND_bytes(token, sizeof(token)) != 1)
-    {
-        Error("Failed to generate token");
-        LOG_ERROR("Failed to generate token");
-        mysql_stmt_free_result(stmt);
-        mysql_stmt_close(stmt);
-        return;
-    }
-
+    RAND_bytes(token, sizeof(token));
     std::string tokenHex = toHex(token, sizeof(token));
-    // TODO: 将 token 存储到redis，并关联到用户会话
+
+    // 在线用户
     {
         std::lock_guard<std::mutex> lock(onlineUsersMutex);
-        if (onlineUsers.find(username) != onlineUsers.end())
+        if (onlineUsers.count(username))
         {
-            nlohmann::json responseJson;
-            responseJson["msg"] = "USER ALREADY LOGGED IN";
-            responseJson["token"] = onlineUsers[username];
-            queueResponse(ProtocolRequest::ACK, responseJson);
-            LOG_WARN("Login failed: user '%llu' is already logged in", username);
-            mysql_stmt_free_result(stmt);
+            Error("USER ALREADY LOGGED IN");
             mysql_stmt_close(stmt);
             return;
         }
-        else
-        {
-            onlineUsers.insert({username, tokenHex});
-        }
+        onlineUsers[username] = tokenHex;
     }
-    nlohmann::json responseJson;
-    responseJson["token"] = tokenHex;
-    responseJson["msg"] = "login successful";
-    queueResponse(ProtocolRequest::ACK, responseJson);
-    LOG_INFO("User '%llu' logged in successfully", username);
 
+    // 回包
+    nlohmann::json res;
+    res["token"] = tokenHex;
+    res["msg"] = "login successful";
+    queueResponse(ProtocolRequest::ACK, res);
+    LOG_INFO("User %llu login success", username);
+
+    // ====================== 更新最后登录时间 ======================
+    mysql_stmt_close(stmt); // 关闭旧stmt
+    stmt = mysql_stmt_init(conn);
     const char *updateSql = "UPDATE users SET last_login=NOW() WHERE username=?";
-    if (mysql_stmt_prepare(stmt, updateSql, strlen(updateSql)) != 0)
-    {
-        LOG_ERROR("Failed to prepare update statement: %s", mysql_error(conn));
-        mysql_stmt_free_result(stmt);
-        mysql_stmt_close(stmt);
-        return;
-    }
-
-    if (mysql_stmt_bind_param(stmt, &bind_param) != 0)
-    {
-        LOG_ERROR("Failed to bind parameters for update: %s", mysql_error(conn));
-        mysql_stmt_free_result(stmt);
-        mysql_stmt_close(stmt);
-        return;
-    }
-
-    if (mysql_stmt_execute(stmt) != 0)
-    {
-        LOG_ERROR("Failed to execute update statement: %s", mysql_error(conn));
-        mysql_stmt_free_result(stmt);
-        mysql_stmt_close(stmt);
-        return;
-    }
-
-    mysql_stmt_free_result(stmt);
+    mysql_stmt_prepare(stmt, updateSql, strlen(updateSql));
+    mysql_stmt_bind_param(stmt, &bind_param);
+    mysql_stmt_execute(stmt);
     mysql_stmt_close(stmt);
 }
 
@@ -570,6 +538,7 @@ void ProtocolConn::Chat()
         LOG_WARN("Chat failed: missing username, message or token");
         return;
     }
+
     unsigned long long username = requestJson["username"].get<unsigned long long>();
     std::string msg = requestJson["msg"].get<std::string>();
     std::string token = requestJson["token"].get<std::string>();
@@ -581,39 +550,43 @@ void ProtocolConn::Chat()
         return;
     }
 
+    // ====================== 【修复】token 验证 ======================
+    bool valid = false;
+    std::string display_name;
     {
         std::lock_guard<std::mutex> lock(onlineUsersMutex);
-        if (onlineUsers.count(username) > 0 || onlineUsers[username] != token)
+        if (onlineUsers.count(username) && onlineUsers[username] == token)
         {
-            Error("Invalid request");
-            LOG_WARN("Invalid chat request from user '%llu'", username);
-            return;
+            valid = true;
         }
     }
+
+    if (!valid)
+    {
+        Error("Invalid token or user not online");
+        LOG_WARN("Invalid chat request from user '%llu'", username);
+        return;
+    }
+
+    // ====================== 插入数据库 ======================
     MYSQL *conn;
     SqlConnRAII(&conn, SqlConnPool::Instance());
     assert(conn);
 
     MYSQL_STMT *stmt = mysql_stmt_init(conn);
-    const char *sql = "INSERT INTO public_messages (username, message) VALUES (?, ?)";
+    const char *sql = "INSERT INTO public_messages (from_username, msg) VALUES (?, ?)";
 
     if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0)
     {
         Error("Database error");
         LOG_ERROR("Failed to prepare statement: %s", mysql_error(conn));
-        if (stmt)
-        {
-            mysql_stmt_free_result(stmt);
-            mysql_stmt_close(stmt);
-        }
+        mysql_stmt_close(stmt);
         return;
     }
 
-    MYSQL_BIND bind_param[2];
-    memset(bind_param, 0, sizeof(bind_param));
+    MYSQL_BIND bind_param[2] = {0};
     bind_param[0].buffer_type = MYSQL_TYPE_LONGLONG;
     bind_param[0].buffer = &username;
-    bind_param[0].buffer_length = sizeof(username);
 
     bind_param[1].buffer_type = MYSQL_TYPE_STRING;
     bind_param[1].buffer = (char *)msg.c_str();
@@ -622,8 +595,6 @@ void ProtocolConn::Chat()
     if (mysql_stmt_bind_param(stmt, bind_param) != 0)
     {
         Error("Database error");
-        LOG_ERROR("Failed to bind parameters: %s", mysql_error(conn));
-        mysql_stmt_free_result(stmt);
         mysql_stmt_close(stmt);
         return;
     }
@@ -631,17 +602,19 @@ void ProtocolConn::Chat()
     if (mysql_stmt_execute(stmt) != 0)
     {
         Error("Database error");
-        LOG_ERROR("Failed to execute statement: %s", mysql_error(conn));
-        mysql_stmt_free_result(stmt);
         mysql_stmt_close(stmt);
         return;
     }
 
-    std::string responseBody = "{\"msg\": \"message sent\"}";
-    queueResponse(ProtocolRequest::ACK, responseBody);
-    LOG_INFO("User '%llu' sent a public message", username);
-    mysql_stmt_free_result(stmt);
+    // ====================== 【修复】INSERT 不用 free_result ======================
     mysql_stmt_close(stmt);
+
+    // ====================== 正确回包（JSON格式） ======================
+    nlohmann::json res;
+    res["msg"] = "message sent";
+    queueResponse(ProtocolRequest::ACK, res);
+
+    LOG_INFO("User '%llu' sent a public message: %s", username, msg.c_str());
 }
 
 void ProtocolConn::PrivateChat()
@@ -676,7 +649,7 @@ void ProtocolConn::PrivateChat()
     SqlConnRAII(&conn, SqlConnPool::Instance());
     assert(conn);
     MYSQL_STMT *stmt = mysql_stmt_init(conn);
-    const char *sql = "INSERT INTO private_messages (from_username, to_username, message) VALUES (?, ?, ?)";
+    const char *sql = "INSERT INTO private_messages (from_username, to_username, msg) VALUES (?, ?, ?)";
 
     if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0)
     {
@@ -882,7 +855,7 @@ void ProtocolConn::CharHistory()
     }
 
     MYSQL_STMT *stmt = mysql_stmt_init(conn);
-    const char *sql = "SELECT from_username, message, created_at "
+    const char *sql = "SELECT from_username, msg, created_at "
                       "FROM public_messages "
                       "ORDER BY created_at DESC";
     if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0)
@@ -987,7 +960,7 @@ void ProtocolConn::PrivateChatHistory()
     }
 
     MYSQL_STMT *stmt = mysql_stmt_init(conn);
-    const char *sql = "SELECT message, created_at, from_username "
+    const char *sql = "SELECT msg, created_at, from_username "
                       "FROM private_messages "
                       "WHERE (from_username=? AND to_username=?) OR (from_username=? AND to_username=?) "
                       "ORDER BY created_at DESC";

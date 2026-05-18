@@ -10,13 +10,13 @@ MAGIC = 0x00114514
 
 TYPE = {
     "LOGIN": 1,
-    "ACK": 2,
-    "CHAT": 3,
-    "PRIVATE_CHAT": 4,
-    "USER_LIST": 5,
-    "LOGOUT": 6,
-    "ERROR": 7,
-    "REGISTER": 8,
+    "LOGOUT": 2,
+    "REGISTER": 3,
+    "ACK": 4,
+    "CHAT": 5,
+    "PRIVATE_CHAT": 6,
+    "USER_LIST": 7,
+    "ERROR": 8,
     "GROUP_CHAT_HISTORY": 9,
     "PRIVATE_CHAT_HISTORY": 10,
 }

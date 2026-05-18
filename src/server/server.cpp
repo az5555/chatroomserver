@@ -89,34 +89,34 @@ void Server::Start()
         {
             timeMS = timer_->GetNextTick();
         }
-    }
-    int eventCnt = epoller_->Wait(timeMS);
-    for (int i = 0; i < eventCnt; i++)
-    {
-        int fd = epoller_->GetEventFd(i);
-        uint32_t events = epoller_->GetEvents(i);
-        if (fd == listenFd_)
+        int eventCnt = epoller_->Wait(timeMS);
+        for (int i = 0; i < eventCnt; i++)
         {
-            DealListen_();
-        }
-        else if (events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
-        {
-            assert(clients_.count(fd) > 0);
-            CloseConn_(&clients_[fd]);
-        }
-        else if (events & EPOLLIN)
-        {
-            assert(clients_.count(fd) > 0);
-            DealRead_(&clients_[fd]);
-        }
-        else if (events & EPOLLOUT)
-        {
-            assert(clients_.count(fd) > 0);
-            DealWrite_(&clients_[fd]);
-        }
-        else
-        {
-            LOG_ERROR("Unexpected event");
+            int fd = epoller_->GetEventFd(i);
+            uint32_t events = epoller_->GetEvents(i);
+            if (fd == listenFd_)
+            {
+                DealListen_();
+            }
+            else if (events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+            {
+                assert(clients_.count(fd) > 0);
+                CloseConn_(&clients_[fd]);
+            }
+            else if (events & EPOLLIN)
+            {
+                assert(clients_.count(fd) > 0);
+                DealRead_(&clients_[fd]);
+            }
+            else if (events & EPOLLOUT)
+            {
+                assert(clients_.count(fd) > 0);
+                DealWrite_(&clients_[fd]);
+            }
+            else
+            {
+                LOG_ERROR("Unexpected event");
+            }
         }
     }
 }

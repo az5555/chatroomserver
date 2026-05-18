@@ -7,13 +7,13 @@ MAGIC = 0x00114514
 
 TYPE = {
     "LOGIN": 1,
-    "ACK": 2,
-    "CHAT": 3,
-    "PRIVATE_CHAT": 4,
-    "USER_LIST": 5,
-    "LOGOUT": 6,
-    "ERROR": 7,
-    "REGISTER": 8,
+    "LOGOUT": 2,
+    "REGISTER": 3,
+    "ACK": 4,
+    "CHAT": 5,
+    "PRIVATE_CHAT": 6,
+    "USER_LIST": 7,
+    "ERROR": 8,
     "GROUP_CHAT_HISTORY": 9,
     "PRIVATE_CHAT_HISTORY": 10,
 }
@@ -70,7 +70,7 @@ async def main() -> None:
     parser.add_argument("--password", default="5365220")
     parser.add_argument("--display-name", default="test")
     args = parser.parse_args()
-
+    """
     print("REGISTER...")
     try:
         resp = await round_trip(
@@ -83,10 +83,11 @@ async def main() -> None:
                 "display_name": args.display_name,
             },
         )
-        print("REGISTER response:", resp)
+        print("REGISTER response type:", resp.get("type"))
+        print("REGISTER response body:\n", json.dumps(resp.get("body", {}), ensure_ascii=False, indent=2))
     except Exception as exc:
         print("REGISTER failed:", exc)
-
+    """
     print("LOGIN...")
     token = ""
     try:
@@ -96,7 +97,8 @@ async def main() -> None:
             TYPE["LOGIN"],
             {"username": args.username, "password": args.password},
         )
-        print("LOGIN response:", resp)
+        print("LOGIN response type:", resp.get("type"))
+        print("LOGIN response body:\n", json.dumps(resp.get("body", {}), ensure_ascii=False, indent=2))
         token = resp.get("body", {}).get("token", "")
     except Exception as exc:
         print("LOGIN failed:", exc)
@@ -109,7 +111,8 @@ async def main() -> None:
             TYPE["CHAT"],
             {"username": args.username, "msg": "hello", "token": token},
         )
-        print("CHAT response:", resp)
+        print("CHAT response type:", resp.get("type"))
+        print("CHAT response body:\n", json.dumps(resp.get("body", {}), ensure_ascii=False, indent=2))
     except Exception as exc:
         print("CHAT failed:", exc)
 
